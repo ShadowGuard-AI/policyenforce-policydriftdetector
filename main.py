@@ -3,7 +3,6 @@ import json
 import logging
 import sys
 import yaml
-from jsonschema import validate, ValidationError, SchemaError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -14,11 +13,10 @@ def setup_argparse():
     Returns:
         argparse.ArgumentParser: The configured argument parser.
     """
-    parser = argparse.ArgumentParser(description='Detects policy drift by comparing system configuration against a defined security policy.')
+    parser = argparse.ArgumentParser(description='Detects policy drift by comparing the values in a data file against the expected settings in a policy file. Both files are named by the operator; no system information is read directly.')
 
-    parser.add_argument('policy_file', help='Path to the security policy file (YAML or JSON).')
-    parser.add_argument('data_file', help='Path to the data file (YAML or JSON) containing the current system configuration.')
-    parser.add_argument('--alert', action='store_true', help='Create an alert if deviations are found.')
+    parser.add_argument('policy_file', help='Path to the policy file (YAML or JSON) holding a mapping of setting names to expected values.')
+    parser.add_argument('data_file', help='Path to the data file (YAML or JSON) holding a mapping of setting names to current values.')
     parser.add_argument('--log_level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help='Set the logging level.')
 
     return parser
@@ -54,27 +52,27 @@ def load_data(file_path):
         logging.error(f"An unexpected error occurred: {e}")
         raise
     
-def validate_data(data, schema):
+def compare_settings(policy_data, system_data):
     """
-    Validates data against a JSON schema.
+    Compares current values against the expected settings in the policy.
     Args:
-        data (dict): The data to validate.
-        schema (dict): The JSON schema.
+        policy_data (dict): Mapping of setting names to expected values.
+        system_data (dict): Mapping of setting names to current values.
     Returns:
-        bool: True if the data is valid, False otherwise.
+        list: One drift line per key whose current value differs from the
+        expected value, is missing from the data, or is present in the
+        data but not listed in the policy.
     """
-    try:
-        validate(instance=data, schema=schema)
-        return True
-    except ValidationError as e:
-        logging.error(f"Validation Error: {e}")
-        return False
-    except SchemaError as e:
-        logging.error(f"Schema Error: {e}")
-        return False
-    except Exception as e:
-        logging.error(f"An unexpected error occurred during validation: {e}")
-        return False
+    drift = []
+    for key in sorted(policy_data):
+        if key not in system_data:
+            drift.append(f"{key}: missing from the data file (expected {policy_data[key]!r})")
+        elif system_data[key] != policy_data[key]:
+            drift.append(f"{key}: current value {system_data[key]!r} differs from expected {policy_data[key]!r}")
+    for key in sorted(system_data):
+        if key not in policy_data:
+            drift.append(f"{key}: present in the data file but not listed in the policy")
+    return drift
 
 def main():
     """
@@ -87,26 +85,32 @@ def main():
     logging.getLogger().setLevel(args.log_level.upper())
 
     try:
-        # Load policy and data
-        policy_data = load_data(args.policy_file)
+        # Load policy and data. A policy file that cannot be parsed, or
+        # that does not hold a non-empty mapping of expected settings,
+        # is a problem with the policy file itself, never drift.
+        try:
+            policy_data = load_data(args.policy_file)
+        except ValueError as e:
+            logging.error(f"Policy file is invalid: {args.policy_file} - {e}")
+            sys.exit(1)
+        if not isinstance(policy_data, dict) or not policy_data:
+            logging.error(f"Policy file is invalid: {args.policy_file} must hold a mapping of setting names to expected values.")
+            sys.exit(1)
+
         system_data = load_data(args.data_file)
-
-        # Validate
-        if not policy_data:
-            logging.error("Policy data could not be loaded.")
-            sys.exit(1)
-        if not system_data:
-            logging.error("System data could not be loaded.")
+        if not isinstance(system_data, dict):
+            logging.error(f"Data file is invalid: {args.data_file} must hold a mapping of setting names to current values.")
             sys.exit(1)
 
-        is_valid = validate_data(system_data, policy_data)
+        drift = compare_settings(policy_data, system_data)
 
-        if is_valid:
+        if not drift:
             logging.info("System configuration is compliant with the security policy.")
         else:
             logging.warning("Policy drift detected!")
-            if args.alert:
-                logging.warning("Creating alert...") # Placeholder for alert creation logic
+            for line in drift:
+                logging.warning(f"Drift: {line}")
+            sys.exit(1)
 
     except FileNotFoundError as e:
         logging.error(f"File not found: {e.filename}")
