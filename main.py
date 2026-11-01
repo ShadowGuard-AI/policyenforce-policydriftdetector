@@ -35,6 +35,7 @@ def load_data(file_path):
     """
     try:
         with open(file_path, 'r') as file:
+            # The parser is chosen by filename suffix alone, case included. A YAML file named with an uppercase suffix, or a YAML document saved as .json, is handed to the wrong parser and reported as invalid content rather than as a naming mismatch.
             if file_path.endswith('.yaml') or file_path.endswith('.yml'):
                 data = yaml.safe_load(file)
             elif file_path.endswith('.json'):
@@ -67,8 +68,10 @@ def compare_settings(policy_data, system_data):
     for key in sorted(policy_data):
         if key not in system_data:
             drift.append(f"{key}: missing from the data file (expected {policy_data[key]!r})")
+        # Values compare with plain Python equality across two different parsers. YAML turns yes into True and JSON has no yes, while True and 1 compare equal here, so a policy written as yes and a data file carrying 1 pass as identical. Type drift between the two files is mostly invisible to me.
         elif system_data[key] != policy_data[key]:
             drift.append(f"{key}: current value {system_data[key]!r} differs from expected {policy_data[key]!r}")
+    # Extra keys are appended after the whole policy pass instead of being merged into one sorted list, so the drift output is two alphabetical runs back to back. A reader looking for one alphabetical report will miss an extra key that sorts before every policy key.
     for key in sorted(system_data):
         if key not in policy_data:
             drift.append(f"{key}: present in the data file but not listed in the policy")
@@ -98,10 +101,12 @@ def main():
             sys.exit(1)
 
         system_data = load_data(args.data_file)
+        # An empty mapping passes this test, where the policy side above rejects an empty mapping outright. That asymmetry is the honest one: an empty data file means every setting is missing, which is drift, while an empty policy would make any data file look compliant.
         if not isinstance(system_data, dict):
             logging.error(f"Data file is invalid: {args.data_file} must hold a mapping of setting names to current values.")
             sys.exit(1)
 
+        # If either file uses keys of mixed types, which YAML happily produces, the sorted() calls inside compare_settings raise TypeError and the run ends in the generic handler below as an unexpected error, not as a complaint about the key shapes.
         drift = compare_settings(policy_data, system_data)
 
         if not drift:
